@@ -154,6 +154,37 @@ class InventoryQueueTests(unittest.TestCase):
             found = self.module.elf_files(tree, ("app",))
         self.assertEqual([item["path"] for item in found], ["app/bin/Tool"])
 
+    def test_counts_never_double_count_a_binary_in_both_sets(self):
+        state = {"queue": [{"path": "a", "size": 1}, {"path": "b", "size": 2}],
+                 "done": {"a": {}, "b": {}}, "failed": {"a": {}}, "claimed": {}}
+        counts = self.module.count_queue(state)
+        self.assertEqual(counts["done"], 1)
+        self.assertEqual(counts["failed"], 0)
+        self.assertEqual(counts["pending"], 0)
+        self.assertEqual(counts["overlap"], 1)
+
+    def test_repair_resolves_an_overlap_from_the_artifacts_on_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state.json"
+            out = root / "out"
+            (out / "done.so").mkdir(parents=True)
+            (out / "done.so" / "x.c").write_text("/* c */\n")
+            (out / "gone.so").mkdir(parents=True)
+            state = {"schema": 1,
+                     "queue": [{"path": "app/bin/done.so", "size": 1},
+                               {"path": "app/bin/gone.so", "size": 2}],
+                     "done": {"app/bin/done.so": {}, "app/bin/gone.so": {}},
+                     "failed": {"app/bin/done.so": {}, "app/bin/gone.so": {}},
+                     "claimed": {}}
+            self.module.save_state(state_path, state)
+            self.assertEqual(self.module.repair_state(state_path, out), 2)
+            repaired = self.module.load_state(state_path)
+            self.assertIn("app/bin/done.so", repaired["done"])
+            self.assertNotIn("app/bin/done.so", repaired["failed"])
+            self.assertIn("app/bin/gone.so", repaired["failed"])
+            self.assertNotIn("app/bin/gone.so", repaired["done"])
+
     def test_queue_is_sorted_small_first_and_state_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "state.json"

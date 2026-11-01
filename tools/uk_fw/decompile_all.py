@@ -166,27 +166,86 @@ def worker(tree: Path, state_path: Path, out_root: Path, timeout: int,
             out = out_root / Path(target["path"]).name
             command = [sys.executable, str(HERE / "decompile.py"),
                        "--binary", str(binary), "--select", "ALL",
-                       "--project", str(PROJECT / "work/ghidra-all" / Path(target["path"]).name),
+                       # One project directory per worker: two overlapping runs used to
+                       # collide on the same path and abort with a lock exception.
+                       "--project", str(PROJECT / f"work/ghidra-all-{index}"
+                                      / Path(target["path"]).name),
                        "--out", str(out), "--limit", "0",
                        "--analysis-timeout", "1800", "--function-timeout", "60",
                        "--discard"]
             started = time.time()
-            finished = subprocess.run(command, capture_output=True, text=True,
-                                      timeout=timeout, check=False)
+            try:
+                finished = subprocess.run(command, capture_output=True, text=True,
+                                          timeout=timeout, check=False)
+                returncode = finished.returncode
+                output = (finished.stdout or "") + (finished.stderr or "")
+            except subprocess.TimeoutExpired as expired:
+                # A single slow binary must not take the queue down with it.
+                returncode = -1
+                output = (f"timed out after {timeout}s: "
+                          f"{(expired.stdout or b'')[-300:]!r}")
             state = load_state(state_path)
             record = {"path": target["path"], "size": target["size"],
-                      "returncode": finished.returncode,
+                      "returncode": returncode,
                       "seconds": round(time.time() - started, 1)}
-            if finished.returncode == 0:
+            artifacts = (len(list(out.glob("*.c"))) + len(list(out.glob("*.asm")))
+                         if out.is_dir() else 0)
+            record["artifacts"] = artifacts
+            if artifacts:
+                # The artifacts are the deliverable: a binary that produced them is done
+                # even when the headless launcher still exits non-zero for its own
+                # reasons, and a binary that failed once then succeeded belongs to one
+                # set only.
                 state["done"][target["path"]] = record
+                state["failed"].pop(target["path"], None)
                 processed.append(record)
             else:
-                record["log_tail"] = (finished.stdout + finished.stderr)[-500:]
+                record["log_tail"] = output[-500:]
                 state["failed"][target["path"]] = record
+                state["done"].pop(target["path"], None)
             save_state(state_path, state)
         finally:
             release(state_path, target["path"])
     return {"processed": processed}
+
+
+def count_queue(state: dict) -> dict:
+    """Counts that cannot double-count a binary present in both sets.
+
+    A path used to land in `done` and stay in `failed` after a later success, which made
+    `queue - done - failed` subtract it twice and under-report the work left.
+    """
+    done = set(state["done"])
+    failed = set(state["failed"])
+    pending = [item["path"] for item in state["queue"]
+               if item["path"] not in done and item["path"] not in failed]
+    return {"queue": len(state["queue"]), "done": len(done - failed),
+            "failed": len(failed - done), "pending": len(pending),
+            "overlap": len(done & failed)}
+
+
+def repair_state(state_path: Path, out_root: Path) -> int:
+    """Resolve entries that sit in both `done` and `failed`.
+
+    The artifact on disk decides: a directory with C or listing output means the binary
+    decompiled, so the failure record is dropped (and the other way round).
+    """
+    state = load_state(state_path)
+    overlap = set(state["done"]) & set(state["failed"])
+    fixed = 0
+    for relative in overlap:
+        out = out_root / Path(relative).name
+        has_artifacts = out.is_dir() and any(
+            out.glob("*.c")) or out.is_dir() and any(out.glob("*.asm"))
+        if has_artifacts:
+            state["failed"].pop(relative, None)
+            state["done"][relative].setdefault("note", "repaired: artifacts on disk")
+        else:
+            state["done"].pop(relative, None)
+        fixed += 1
+    if fixed:
+        save_state(state_path, state)
+    return fixed
 
 
 def main(argv=None) -> int:
@@ -211,11 +270,12 @@ def main(argv=None) -> int:
     if "queue" not in state:
         state["queue"] = elf_files(args.tree, tuple(args.roots))
         save_state(state_path, state)
-    total = len(state["queue"])
-    done = len(state["done"])
-    print(json.dumps({"queue": total, "done": done,
-                      "remaining": total - done - len(state["failed"]),
-                      "failed": len(state["failed"])}, indent=2))
+    repaired = repair_state(state_path, args.out.resolve())
+    if repaired:
+        print(json.dumps({"repaired_overlap": repaired}))
+        state = load_state(state_path)
+    counts = count_queue(state)
+    print(json.dumps(counts, indent=2))
     removed = clear_stale_claims(state_path)
     if removed:
         print(json.dumps({"cleared_stale_claims": removed}))

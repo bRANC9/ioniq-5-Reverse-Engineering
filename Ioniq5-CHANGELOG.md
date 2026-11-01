@@ -20,9 +20,21 @@ belongs to the parallel Kona programme and is not modified by IONIQ work.
   binary) after thread-shared claiming proved fragile: two workers fighting over one
   claim exited early and left the queue half done. A stale-lock takeover keeps a killed
   worker's slice from wedging the run.
-- First pass with three workers: 85 of 157 binaries decompiled, 0 failures. State is
-  `work/decompiled/all-state.json`; `--dry-run` prints the queue and re-running the same
-  command resumes from there.
+- Accounting corrected after review: a binary that failed and later decompiled stayed in
+  both `done` and `failed`, so `queue - done - failed` subtracted it twice. Success now
+  pops the failure record (and the reverse), `count_queue` reports the two sets as a
+  difference with an explicit `overlap` count, and `repair_state` resolves any existing
+  overlap from the artifacts on disk. The shipped state had three such entries and was
+  repaired.
+- Success is judged by artifacts, not by the launcher's exit status: four binaries that
+  produced thousands of C files were being recorded as failures because the headless
+  launcher exited non-zero for its own reasons. The two genuinely empty ones turned out
+  to be project-lock collisions between two overlapping queue runs, so each worker now
+  gets its own project directory.
+- A per-binary timeout is recorded as a failure with its reason instead of killing the
+  queue.
+- State is `work/decompiled/all-state.json`; `--dry-run` prints the queue and re-running
+  the same command resumes from there.
 
 ## 0.93.0 - the decompile is complete: every body-bearing AppNavi function has an artifact
 
