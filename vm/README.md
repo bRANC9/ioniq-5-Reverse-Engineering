@@ -29,6 +29,84 @@ local firmware, generated guest images and build outputs at their original
 snapshot. Obtain the official package and rebuild the local inputs before
 using a script. Check its exact paths and assumptions first.
 
+## One-command local setup
+
+With the verified EU package at `work/firmware/IONIQ5_EU`, run from the project
+root:
+
+```sh
+python3 tools/uk_fw/setup_eu260128.py
+```
+
+This verifies all 35 `.ver` payloads, decrypts seven TE2 files, safely extracts
+five archives into `work/decrypted-eu-260128/extracted-safe`, and prepares a
+minimal kernel/serial-shell workspace at `work/vm/bootable-eu260128` when static
+BusyBox and `mkfs.ext4` are available. To set up a local QEMU without root and
+smoke-test that shell, use:
+
+```sh
+python3 tools/uk_fw/setup_eu260128.py --setup-qemu --boot-test
+```
+
+That optional mode downloads Ubuntu Jammy packages into ignored `work/tools/qemu`
+without installing them system-wide. It runs QEMU in snapshot mode with no NIC
+and the documented VM-only SDHCI adaptation. The extracted tree does not preserve
+original file ownership, and the boot workspace is **not** the full authentic
+Home/Navigation HMI. The setup script does not modify or execute vendor payloads;
+all outputs remain under ignored `work/` and must not be committed.
+
+`tests/test_vm_e2e.py` then re-boots that workspace and asserts the end-to-end
+contract from the host: kernel identity, ext4 root through the SDHCI patch, root
+shell, ABL loader arguments, run artifacts, and a relayed guest exit status. It
+skips when QEMU or the workspace is absent. `vm_boot.py` resolves QEMU from
+`IONIQ_VM_QEMU`, then `work/tools/qemu/bin/qemu-system-x86_64`, then `PATH`, so
+the locally unpacked binary needs no `PATH` edit.
+
+## Recovered vendor userspace
+
+The kernel shell above contains no vendor code. The recovered root is booted from a
+second workspace, built offline from the same extracted trees:
+
+```sh
+pip install --user ziglang                       # guest helpers for glibc 2.25
+python3 tools/uk_fw/vendor_rootfs.py prepare \
+    --container work/firmware/IONIQ5_EU/HU/images/iasImage_1280_sub
+python3 -m unittest discover -s tests -p 'test_vm_vendor_e2e.py' -v
+```
+
+`prepare` hardlinks the vendor root and the `new_gui`/`navi` trees into
+`work/vm/vendor-userspace-260128/rootfs-tree`, adds a research init and the staged
+chain, and images them as an 8 GiB ext4 SD card. QEMU accepts only power-of-two card
+sizes, which is why the image is larger than the tree. The chain brings the vendor
+dynamic loader, system and session D-Bus, weston 1.10 (`headless-backend.so` with
+`ivi-shell.so`, selected from the config file), `dlt-daemon` and `AppLauncher` with
+`ApplicationManager` up in about 35 seconds under TCG.
+
+`refresh --workspace <dir>` replaces `/init`, `/opt/vm/vendor-chain.sh`, the weston
+config and the guest helpers inside the existing image, then rewrites the manifest
+hashes; use it while tuning instead of paying for a full re-image.
+
+`tests/test_vm_vendor_e2e.py` asserts the stages from the host. The interposition
+fact is worth stating precisely: the vendor `libwayland-client` exports no
+`wl_surface_commit` symbol (`PROBE surface_symbol=0`), so the observer hooks
+`wl_proxy_marshal`, and the guest reports `marshal … interposed=1`, a real client's
+`null-attach … attach=1` and `commit-after-null-attach … commit=1`, and finally
+`verdict=observed commits=2 complete=1`. The chain is ours, not the vendor's: no
+vehicle bus input is fabricated, and AppNavi's own hide path is still not exercised —
+the process runs, but under this root it never attaches a surface.
+
+## Decompilation and the published input audit
+
+`tools/uk_fw/decompile.py` drives Ghidra headless (JDK 21 unpacked under
+`~/.local/tools`, no root) and turns a retained listing address into C under ignored
+`work/decompiled/<binary>/`. Two complete runs back the published notes: `ivi-shell.so`
+(400 functions) and `AppLauncher` (1114 functions). The `ivi-shell` result is summarised
+in [`vendor-userspace-260128/ivi-shell-input-audit.txt`](evidence/vendor-userspace-260128/ivi-shell-input-audit.txt):
+no `wl_keyboard`, `wl_pointer`, `notify_key` or `notify_button` reference, with the
+activation and input-panel family present. Its SHA-256 is in
+[`evidence-manifest.json`](evidence-manifest.json), and `tests/test_vm_publication.py`
+re-hashes it on every run.
+
 ## Local artifact boundary
 
 The private `work/vm/` tree is about 1.6 TB and contains sparse VM disks,

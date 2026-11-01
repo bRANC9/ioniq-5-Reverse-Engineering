@@ -38,6 +38,8 @@ COMPAT_ENTRY = struct.pack("<6IQ", 0x1b36, 7, 0xffffffff, 0xffffffff,
 EXT4_FEATURES = ("none,has_journal,ext_attr,resize_inode,dir_index,filetype,extent,"
                  "flex_bg,sparse_super,large_file,huge_file,dir_nlink,extra_isize")
 ARTIFACTS = ("bzImage", "rootfs.img", "manifest.bin", "seed_dev.bin", "seed_user.bin")
+QEMU_ENV = "IONIQ_VM_QEMU"
+LOCAL_QEMU = PROJECT / "work/tools/qemu/bin/qemu-system-x86_64"
 DEFAULT_COMMAND = ("/bin/busybox uname -r; /bin/busybox id; "
                    "/bin/busybox cat /proc/partitions; "
                    "/bin/busybox ls /sys/kernel/abl")
@@ -59,8 +61,11 @@ exec $BB sh
 
 
 def sha256(path: Path) -> str:
-    with path.open("rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def project_output(path: Path) -> Path:
@@ -71,6 +76,23 @@ def project_output(path: Path) -> Path:
     if any(c in str(path) for c in (",", "\n", "\r")):
         raise ValueError("output path cannot contain commas or newlines")
     return path
+
+
+def find_qemu() -> str | None:
+    """Resolve QEMU: explicit override, project-local bootstrap, then PATH.
+
+    setup_eu260128.py --setup-qemu unpacks QEMU under work/tools/qemu, which is
+    not on PATH; the override lets a run name any other verified install.
+    """
+    override = os.environ.get(QEMU_ENV)
+    if override:
+        candidate = Path(override)
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise ValueError(f"{QEMU_ENV} does not name an executable QEMU: {override}")
+        return str(candidate.resolve())
+    if LOCAL_QEMU.is_file() and os.access(LOCAL_QEMU, os.X_OK):
+        return str(LOCAL_QEMU)
+    return shutil.which("qemu-system-x86_64")
 
 
 def extract_boot_image(raw: bytes) -> bytes:
@@ -314,8 +336,8 @@ def qemu_command(workspace: Path, qemu: str, compat: bool,
                           ("seed_user.bin", "0x21000040")):
         command += ["-device", f"loader,file={workspace / name},addr={address}"]
     command += ["-device", "sdhci-pci,id=sdhci0", "-drive",
-                f"if=none,id=sd0,format=raw,file={workspace / 'rootfs.img'},snapshot=on",
-                "-device", "sd-card,drive=sd0", "-append",
+                f"if=none,id=ioniq-sd0,format=raw,file={workspace / 'rootfs.img'},snapshot=on",
+                "-device", "sd-card,drive=ioniq-sd0", "-append",
                 "root=/dev/mmcblk0 rootwait rootdelay=2 rootfstype=ext4 rw init=/init "
                 "console=ttyS0,115200 panic=-1 loglevel=7 "
                 "ABL.oemkm=40@20000000 ABL.seed=21000000,21000040",
@@ -361,9 +383,10 @@ def run(workspace: Path, compat: bool, command: str, timeout: float,
         memory_mib: int = 1024) -> int:
     workspace = project_output(workspace)
     verify_workspace(workspace)
-    qemu = shutil.which("qemu-system-x86_64")
+    qemu = find_qemu()
     if not qemu:
-        raise ValueError("qemu-system-x86_64 is not installed")
+        raise ValueError("qemu-system-x86_64 is not installed; run "
+                         "setup_eu260128.py --setup-qemu or set " + QEMU_ENV)
     if timeout < 0 or (timeout == 0 and not interactive):
         raise ValueError("timeout must be positive (or zero for interactive mode)")
     if graphics_smoke:
