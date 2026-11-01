@@ -266,6 +266,15 @@ def repair_state(state_path: Path, out_root: Path) -> int:
     state = load_state(state_path)
     overlap = set(state["done"]) & set(state["failed"])
     fixed = 0
+    # A failure record whose binary already has artifacts on disk is stale: the run that
+    # recorded it predates the artifact-based success rule.
+    for relative in list(state["failed"]):
+        out = out_root / Path(relative).name
+        if out.is_dir() and (any(out.glob("*.c")) or any(out.glob("*.asm"))):
+            record = state["failed"].pop(relative)
+            record.setdefault("note", "repaired: artifacts on disk")
+            state["done"][relative] = record
+            fixed += 1
     for relative in overlap:
         out = out_root / Path(relative).name
         has_artifacts = out.is_dir() and any(
