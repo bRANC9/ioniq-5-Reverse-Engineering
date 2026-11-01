@@ -163,6 +163,48 @@ class InventoryQueueTests(unittest.TestCase):
         self.assertEqual(counts["pending"], 0)
         self.assertEqual(counts["overlap"], 1)
 
+    def test_main_dry_run_reports_counts_and_exits_clean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "tree"
+            (tree / "app/bin").mkdir(parents=True)
+            (tree / "app/bin/Tool").write_bytes(b"\x7fELF" + bytes(60))
+            state = root / "state.json"
+            with mock.patch("builtins.print"):
+                code = self.module.main(["--tree", str(tree), "--roots", "app",
+                                         "--state", str(state), "--out",
+                                         str(root / "out"), "--dry-run"])
+            self.assertEqual(code, 0)
+            saved = self.module.load_state(state)
+            self.assertEqual([item["path"] for item in saved["queue"]], ["app/bin/Tool"])
+
+    def test_main_fails_when_nothing_was_produced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state.json"
+            payload = {"schema": 1, "queue": [{"path": "app/bin/X", "size": 1}],
+                       "done": {}, "failed": {"app/bin/X": {"returncode": 1}},
+                       "claimed": {}}
+            self.module.save_state(state, payload)
+            with mock.patch("builtins.print"), \
+                    mock.patch.object(self.module, "worker", return_value={}):
+                code = self.module.main(["--state", str(state), "--out", str(root / "out")])
+            self.assertEqual(code, 1)
+
+    def test_every_binary_lands_in_exactly_one_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state.json"
+            payload = {"schema": 1, "queue": [{"path": "app/bin/X", "size": 1}],
+                       "done": {"app/bin/X": {"artifacts": 3}},
+                       "failed": {"app/bin/X": {"returncode": 1}}, "claimed": {}}
+            self.module.save_state(state, payload)
+            self.assertEqual(self.module.repair_state(state, root / "out"), 1)
+            repaired = self.module.load_state(state)
+            self.assertFalse(set(repaired["done"]) & set(repaired["failed"]))
+            counts = self.module.count_queue(repaired)
+            self.assertEqual((counts["done"], counts["failed"], counts["pending"]), (0, 1, 0))
+
     def test_repair_resolves_an_overlap_from_the_artifacts_on_disk(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

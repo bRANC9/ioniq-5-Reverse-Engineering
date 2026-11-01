@@ -15,6 +15,8 @@ Binaries are ordered small first so the queue delivers results early.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -68,10 +70,34 @@ def load_state(path: Path) -> dict:
     return {"schema": 1, "done": {}, "failed": {}, "claimed": {}}
 
 
+@contextlib.contextmanager
+def state_lock(path: Path):
+    """Serialise state read-modify-write across worker processes."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def save_state(path: Path, state: dict) -> None:
-    temp = path.with_suffix(".tmp")
+    # A shared ".tmp" name meant two workers could overwrite each other's snapshot
+    # between write and rename; the name is unique per process and rename is atomic.
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     temp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temp.replace(path)
+    os.replace(temp, path)
+
+
+def update_state(path: Path, mutate) -> dict:
+    """Load, mutate and save under one lock so no worker loses a record."""
+    with state_lock(path):
+        state = load_state(path)
+        mutate(state)
+        save_state(path, state)
+        return state
 
 
 def claim(state_path: Path, relative: str, max_age: float = 120.0) -> bool:
@@ -157,8 +183,16 @@ def worker(tree: Path, state_path: Path, out_root: Path, timeout: int,
         mine = [item for position, item in enumerate(pending) if position % count == index]
         if not mine:
             break
-        target = mine[0]
-        if not claim(state_path, target["path"]):
+        # Take the first candidate this worker can actually claim: retrying only the
+        # head of the slice wedges the worker behind someone else's lock.
+        target = None
+        # The claim has to outlive the job it guards, otherwise a slow binary looks
+        # abandoned and a second worker takes it over mid-run.
+        for candidate in mine:
+            if claim(state_path, candidate["path"], max_age=timeout + 600):
+                target = candidate
+                break
+        if target is None:
             time.sleep(3)
             continue
         try:
@@ -184,7 +218,6 @@ def worker(tree: Path, state_path: Path, out_root: Path, timeout: int,
                 returncode = -1
                 output = (f"timed out after {timeout}s: "
                           f"{(expired.stdout or b'')[-300:]!r}")
-            state = load_state(state_path)
             record = {"path": target["path"], "size": target["size"],
                       "returncode": returncode,
                       "seconds": round(time.time() - started, 1)}
@@ -276,7 +309,7 @@ def main(argv=None) -> int:
         state = load_state(state_path)
     counts = count_queue(state)
     print(json.dumps(counts, indent=2))
-    removed = clear_stale_claims(state_path)
+    removed = clear_stale_claims(state_path, max_age=args.timeout + 600)
     if removed:
         print(json.dumps({"cleared_stale_claims": removed}))
     if args.dry_run:
@@ -294,8 +327,12 @@ def main(argv=None) -> int:
                        "--timeout", str(args.timeout),
                        "--share", f"{index}/{args.jobs}"]
             children.append(sp.Popen(command, stdout=sp.DEVNULL, stderr=sp.STDOUT))
+        failures = 0
         for child in children:
-            child.wait()
+            if child.wait() != 0:
+                failures += 1
+        if failures:
+            print(json.dumps({"worker_failures": failures}))
     else:
         index, count = (0, 1)
         if args.share:
@@ -304,8 +341,12 @@ def main(argv=None) -> int:
         worker(args.tree, state_path, args.out, args.timeout, (index, count))
 
     state = load_state(state_path)
-    print(json.dumps({"done": len(state["done"]), "failed": len(state["failed"]),
-                      "queue": total}, indent=2))
+    final = count_queue(state)
+    print(json.dumps(final, indent=2))
+    # Incomplete when work is left, or when nothing at all came out of it: a run that
+    # failed every binary must not look like a success.
+    if final["pending"] or (final["failed"] and not final["done"]):
+        return 1
     return 0
 
 
