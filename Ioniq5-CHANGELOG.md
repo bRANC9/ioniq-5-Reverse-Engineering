@@ -3,6 +3,27 @@
 All entries describe the IONIQ 5 research programme. The root `CHANGELOG.md`
 belongs to the parallel Kona programme and is not modified by IONIQ work.
 
+## 0.94.0 - whole-tree decompile queue for the vendor application layer
+
+- Added `tools/uk_fw/decompile_all.py`: it inventories every ELF in `app/` and `navi/`
+  (**157 binaries, 382 MB**, third-party Qt/ICU runtimes excluded), then works through them
+  with a resumable queue. Claims are exclusive lock files, so `--jobs N` runs without
+  coordination, and progress lives in `work/decompiled/all-state.json`.
+- The scan skips non-regular files: a recovered rootfs contains device nodes and FIFOs,
+  and opening one blocks the walk (that hang cost a debugging round here).
+- Seeded the state with the binaries already decompiled earlier (AppNavi 157,499
+  artifacts, AppHomeScreen, ApplicationManager, UserProfileManager, AppOSDManager,
+  AppLauncher) so the queue only pays for what is missing.
+- `tests/test_decompile.py` covers the inventory filter, the state round trip and
+  exclusive claiming.
+- Parallel workers run as separate processes over static slices (every n-th pending
+  binary) after thread-shared claiming proved fragile: two workers fighting over one
+  claim exited early and left the queue half done. A stale-lock takeover keeps a killed
+  worker's slice from wedging the run.
+- First pass with three workers: 85 of 157 binaries decompiled, 0 failures. State is
+  `work/decompiled/all-state.json`; `--dry-run` prints the queue and re-running the same
+  command resumes from there.
+
 ## 0.93.0 - the decompile is complete: every body-bearing AppNavi function has an artifact
 
 - Closed the tail: **157,484 `.c` + 15 `.asm` = 157,499 artifacts** for 157,499 body-bearing functions, verified by reconciling `--select LIST` against the files on disk — zero entries without an artifact.

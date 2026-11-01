@@ -132,6 +132,43 @@ class DecompileRunTests(unittest.TestCase):
             self.run_wrapper(binary=self.root / "absent")
 
 
+class InventoryQueueTests(unittest.TestCase):
+    """The queue that drives a whole-tree decompile."""
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "decompile_all", DECOMPILE.PROJECT / "tools/uk_fw/decompile_all.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_finds_elfs_and_skips_third_party_runtimes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / "app/bin").mkdir(parents=True)
+            (tree / "app/lib").mkdir(parents=True)
+            (tree / "app/bin/Tool").write_bytes(b"\x7fELF" + bytes(60))
+            (tree / "app/bin/script.sh").write_text("#!/bin/sh\n")
+            (tree / "app/lib/libQt5Core.so.5").write_bytes(b"\x7fELF" + bytes(60))
+            found = self.module.elf_files(tree, ("app",))
+        self.assertEqual([item["path"] for item in found], ["app/bin/Tool"])
+
+    def test_queue_is_sorted_small_first_and_state_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            state = {"schema": 1, "queue": [{"path": "b", "size": 20},
+                                            {"path": "a", "size": 10}],
+                     "done": {}, "failed": {}, "claimed": {}}
+            self.module.save_state(state_path, state)
+            self.assertEqual(self.module.load_state(state_path)["queue"], state["queue"])
+            # Claims are exclusive so parallel workers cannot take the same binary.
+            self.assertTrue(self.module.claim(state_path, "a"))
+            self.assertFalse(self.module.claim(state_path, "a"))
+            self.module.release(state_path, "a")
+            self.assertTrue(self.module.claim(state_path, "a"))
+
+
 class ScriptContractTests(unittest.TestCase):
     def test_script_is_present_and_arguments_match_the_wrapper(self):
         script = DECOMPILE.SCRIPT_DIR / "DecompileSymbols.java"
