@@ -44,6 +44,55 @@ The same scheme wraps the updater itself: `AppUpgrade` is a TE2 envelope whose b
 decrypts to an ELF64 binary (`work/updater/AppUpgrade.elf`), which is how the gate
 table above could be read from the updater's own strings instead of inferred.
 
+## Measured structure of the packaged updater
+
+`AppUpgrade` is not one binary. Its own `.text` is about 16 KB and the 10.7 MB of
+`.rodata` carries further ELF images: a loader plus an embedded shared object
+(extracted to `work/updater/AppUpgrade.core.so`, 5.7 MB) that links
+`libcrypto.so.1.0.2` and contains **SComo** — Samsung's update engine — together with a
+statically linked **mbedTLS**.
+
+The crypto surface is no longer inferred from log strings, it is named in the code:
+
+| Symbol or path in the core | What it implies |
+| --- | --- |
+| `mbedtls_rsa_pkcs1_decrypt`, `PKCS#1 sig. verify` | RSA signature verification inside the updater |
+| `AES-CBC/CTR/GCM/XTS`, `KW-AES`, `KWP-AES` | key wrapping and content encryption |
+| `/update/fota/public.crt`, `./tool/public.crt` | the verification certificate is read from the **update medium**, not baked into the rootfs |
+| `/update/fota/velix_aes.key`, `./tool/velix_aes.key` | the AES key that protects the payload ships with the package too |
+| `teruten5_pub.key`, `TomTom_Root_CA.crt` | further trust material for specific payload classes |
+| `###[scomo]… E_DELTA_INFO_VERIFY`, `copyIasImageToEmmc` | delta verification stage and the boot-image write path |
+| `CCU Key Lock Signal`, version compares for NAVI/MAP/MODEM/Micom/GPS | the version gate and the hardware lock signal |
+
+The important consequence for the earlier gate table: the application chain is **not**
+CRC-only. If the certificate that verifies the package is taken from the same medium as
+the package, the open question becomes sharper — is that certificate compared against a
+trusted copy before use, or trusted as delivered? That is now the first static question,
+and the decompiled core (`work/decompiled/AppUpgrade-core/`) is where to answer it.
+
+### Three layers, not one binary
+
+`AppUpgrade` carries the whole update stack:
+
+| Layer | Extracted to | What it is |
+| --- | --- | --- |
+| loader | `AppUpgrade.elf` itself | ~16 KB of `.text`, Qt-linked, starts the rest |
+| application | `work/updater/AppUpgrade.core.so` (5.7 MB) | SComo UI/logic: version compares for NAVI/MAP/MODEM/Micom/GPS, delta verify stage, `copyIasImageToEmmc` |
+| OTA engine | `work/updater/AppUpgrade.velix.so` (5.0 MB) | VElix: `PKCS#1 sig. verify`, `E_DELTA_INFO_VERIFY`, `FOTA_NAVI_APP_VERIFY`, signature-result slots |
+
+Crypto in the application layer is read from the **update medium**: `./tool/public.crt`
+and `./tool/velix_aes.key` (also `/update/fota/…`). The decompiled
+`VElix_GetPubKey` opens `./tool/public.crt`, returns its size, then reads it into a
+caller-supplied buffer — the key used for verification is the one shipped with the
+package.
+
+One flag string sits in the OTA engine: `/update/disableNaviMapSignatureCheck_20230207`.
+The decompiled reference is a `QFile::exists()` test inside a UI/menu function that also
+touches `/app/data/AppEngineerMode/dynamicmenu`, so what it gates is **not established**
+— it may enable a menu entry rather than disable verification, and nothing here was run to
+find out. It is recorded because it is the sort of switch that decides whether a package
+check is enforced, and it is the first thing to resolve statically.
+
 ## What this does not establish
 
 - Whether the unit checks the TE2 signature/key stores (B6). If it does, and they cover
