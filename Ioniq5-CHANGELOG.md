@@ -33,6 +33,16 @@ belongs to the parallel Kona programme and is not modified by IONIQ work.
   gets its own project directory.
 - A per-binary timeout is recorded as a failure with its reason instead of killing the
   queue.
+- A job outcome is written onto the **freshest** state under a file lock: the old code
+  saved the snapshot it read before a job that can run for hours, which erased every
+  record a sibling worker committed meanwhile and made finished binaries fall back to
+  pending on each run.
+- A per-binary timeout that leaves partial output is recorded as `timed_out` with
+  `partial_artifacts`, not as done, and any leftover failure makes the run exit non-zero,
+  so a queue cannot report a finished decompile it did not perform.
+- Queue result: **156 of 157 binaries decompiled, zero unexplained failures**;
+  `app/bin/TmsFgApp` (16 MB) is recorded as timed out at 3,600 s with 1,026 partial
+  artifacts and is being finished separately with a four-hour budget.
 - State is `work/decompiled/all-state.json`; `--dry-run` prints the queue and re-running
   the same command resumes from there.
 
