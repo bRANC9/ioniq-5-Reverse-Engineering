@@ -191,6 +191,56 @@ class InventoryQueueTests(unittest.TestCase):
                 code = self.module.main(["--state", str(state), "--out", str(root / "out")])
             self.assertEqual(code, 1)
 
+    def test_timeout_with_partial_output_is_not_recorded_as_done(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "tree"
+            (tree / "app/bin").mkdir(parents=True)
+            (tree / "app/bin/Slow").write_bytes(b"\x7fELF" + bytes(60))
+            state_path = root / "state.json"
+            out = root / "out"
+            (out / "Slow").mkdir(parents=True)
+            (out / "Slow" / "partial.c").write_text("/* partial */\n")
+            self.module.save_state(state_path, {
+                "schema": 1, "queue": [{"path": "app/bin/Slow", "size": 64}],
+                "done": {}, "failed": {}, "claimed": {}})
+            with mock.patch.object(self.module.subprocess, "run",
+                                   side_effect=self.module.subprocess.TimeoutExpired("x", 5)):
+                self.module.worker(tree, state_path, out, 5, (0, 1))
+            saved = self.module.load_state(state_path)
+            self.assertIn("app/bin/Slow", saved["failed"])
+            self.assertNotIn("app/bin/Slow", saved["done"])
+            self.assertTrue(saved["failed"]["app/bin/Slow"]["timed_out"])
+            self.assertEqual(saved["failed"]["app/bin/Slow"]["partial_artifacts"], 1)
+
+    def test_a_sibling_record_survives_a_slow_job(self):
+        """The worker must write back onto the freshest state, not its stale snapshot."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "tree"
+            (tree / "app/bin").mkdir(parents=True)
+            (tree / "app/bin/Mine").write_bytes(b"\x7fELF" + bytes(60))
+            state_path = root / "state.json"
+            out = root / "out"
+            (out / "Mine").mkdir(parents=True)
+            (out / "Mine" / "x.c").write_text("/* c */\n")
+            self.module.save_state(state_path, {
+                "schema": 1, "queue": [{"path": "app/bin/Mine", "size": 64}],
+                "done": {}, "failed": {}, "claimed": {}})
+
+            def fake_run(*args, **kwargs):
+                # A sibling worker commits while our job is running.
+                self.module.update_state(
+                    state_path, lambda current: current["done"].__setitem__(
+                        "app/bin/Theirs", {"artifacts": 7}))
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(self.module.subprocess, "run", side_effect=fake_run):
+                self.module.worker(tree, state_path, out, 5, (0, 1))
+            saved = self.module.load_state(state_path)
+            self.assertIn("app/bin/Mine", saved["done"])
+            self.assertIn("app/bin/Theirs", saved["done"])
+
     def test_every_binary_lands_in_exactly_one_set(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
