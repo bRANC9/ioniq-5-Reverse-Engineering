@@ -140,6 +140,12 @@ Scale note for anyone re-running it: ten workers over separate project copies
 five. The same machinery covers the other binaries, whose totals are small enough for a
 single pass.
 
+**Whole vendor layer:** `tools/uk_fw/decompile_all.py` walks every ELF under `app/` and
+`navi/` (157 binaries, 382 MB, third-party Qt/ICU excluded) and finished with **157 of
+157 decompiled, zero failures, zero pending** — 526,663 `.c` plus 15 `.asm`, 3.1 GB under
+ignored `work/decompiled/`. State lives in `work/decompiled/all-state.json`; a truncated
+run is never promoted to done, so the queue cannot claim a decompile it did not perform.
+
 ### Working recipe (AppNavi)
 
 `AppNavi` is 143 MB, so the import is bounded and kept, and everything after that is

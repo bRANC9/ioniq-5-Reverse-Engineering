@@ -40,9 +40,15 @@ belongs to the parallel Kona programme and is not modified by IONIQ work.
 - A per-binary timeout that leaves partial output is recorded as `timed_out` with
   `partial_artifacts`, not as done, and any leftover failure makes the run exit non-zero,
   so a queue cannot report a finished decompile it did not perform.
-- Queue result: **156 of 157 binaries decompiled, zero unexplained failures**;
-  `app/bin/TmsFgApp` (16 MB) is recorded as timed out at 3,600 s with 1,026 partial
-  artifacts and is being finished separately with a four-hour budget.
+- Queue result: **157 of 157 binaries decompiled, zero failures, zero pending** —
+  **526,663 `.c` plus 15 `.asm` (3.1 GB)** under `work/decompiled/`. The last one,
+  `app/bin/TmsFgApp` (16 MB), timed out at the 3,600 s budget with partial output, was
+  re-run alone with a four-hour budget, and its inventory now reports 10,735 of 10,735
+  body-bearing functions with C before it was recorded as done.
+- A truncated run can never be promoted to done: records carrying `timed_out` or
+  `partial_artifacts` stay on the failure side even when files exist, the wrapper reports
+  its own launcher deadline as exit 3, and `--retry-failed` requeues a recorded failure
+  for the longer attempt.
 - State is `work/decompiled/all-state.json`; `--dry-run` prints the queue and re-running
   the same command resumes from there.
 
