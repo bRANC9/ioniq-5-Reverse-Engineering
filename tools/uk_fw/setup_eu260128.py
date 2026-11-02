@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
@@ -26,9 +25,9 @@ PROJECT = HERE.parents[1]
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-import gen5w_decrypt
-import ver_manifest
-import vm_boot
+import gen5w_decrypt  # noqa: E402  (sibling modules, resolved above)
+import ver_manifest  # noqa: E402
+import vm_boot  # noqa: E402
 
 PACKAGE_ID = "IONIQ5_EU"
 SOFTWARE_VERSION = "NE_E.EUR.S5W_L.001.001.260128"

@@ -333,6 +333,22 @@ class InventoryQueueTests(unittest.TestCase):
             self.assertTrue(self.module.claim(state_path, "a"))
 
 
+class CounterParsingTests(unittest.TestCase):
+    """The wrapper must read the script's summary, not the per-entry lines."""
+
+    def test_per_entry_failure_lines_do_not_pollute_the_counters(self):
+        import re
+
+        log = ("INFO  DecompileSymbols.java> failed 0010a390 : process: timeout\n"
+               "INFO  DecompileSymbols.java> decompiled 12 function(s), skipped 4, "
+               "failed 2, iterated 18 from ALL\n")
+        summary = re.search(r"decompiled (\d+) function\(s\), skipped (\d+), failed (\d+)", log)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.groups(), ("12", "4", "2"))
+        # The naive search the wrapper used before would have reported 0010 -> 10.
+        self.assertEqual(re.search(r"failed (\d+)", log).group(1), "0010")
+
+
 class ScriptContractTests(unittest.TestCase):
     def test_script_is_present_and_arguments_match_the_wrapper(self):
         script = DECOMPILE.SCRIPT_DIR / "DecompileSymbols.java"

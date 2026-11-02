@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import importlib.util
 from pathlib import Path
-import sys
 import tarfile
 import tempfile
 import unittest

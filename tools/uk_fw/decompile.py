@@ -147,15 +147,20 @@ def decompile(binary: Path, select: str, out: Path, ghidra: Path,
     # A 140k-file listing is noise, not a report; the count carries the information.
     sample = [path.name for path in produced[:40]]
     failures_path = out / "failures.tsv"
-    failure_rows = (sum(1 for _ in failures_path.open(encoding="utf-8", errors="replace"))
-                    if failures_path.is_file() else 0)
+    failure_rows = 0
+    if failures_path.is_file():
+        with failures_path.open(encoding="utf-8", errors="replace") as handle:
+            failure_rows = sum(1 for _ in handle)
     # The script reports its own accounting; a resumed run that decompiled nothing
     # but skipped everything already done is a success, not a failure.
+    # Only the script's summary line counts: the per-entry lines read "failed <entry> :",
+    # so a loose "failed (\d+)" search would report the first digits of an address.
     counters = {"decompiled": None, "skipped": None, "failed": None}
-    for name in counters:
-        matched = re.search(rf"{name} (\d+)", log)
-        if matched:
-            counters[name] = int(matched[1])
+    summary = re.search(r"decompiled (\d+) function\(s\), skipped (\d+), failed (\d+)", log)
+    if summary:
+        counters["decompiled"] = int(summary.group(1))
+        counters["skipped"] = int(summary.group(2))
+        counters["failed"] = int(summary.group(3))
     return {
         "decompiled": counters["decompiled"],
         "skipped": counters["skipped"],

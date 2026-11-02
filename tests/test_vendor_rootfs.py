@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 from pathlib import Path
 import sys
 import tempfile
@@ -84,6 +83,26 @@ class AssembleTests(unittest.TestCase):
             (root / "usr/lib/libwayland-client.so.0").unlink()
             with self.assertRaises(VENDOR.VendorError):
                 VENDOR.assemble(root, base / "n", base / "a", base, base / "tree")
+
+
+class RunForwardingTests(unittest.TestCase):
+    """vendor_rootfs run must forward the inspection flags to the boot harness."""
+
+    def test_display_and_interactive_are_forwarded(self):
+        calls = {}
+
+        def fake_run(*args, **kwargs):
+            calls["args"] = args
+            return 0
+
+        with mock.patch.object(VENDOR.vm_boot, "run", side_effect=fake_run), \
+                mock.patch.object(VENDOR, "set_software_gl", return_value={}):
+            code = VENDOR.main(["run", "--display", "vnc", "--interactive",
+                                "--workspace", str(VENDOR.PROJECT / "work/vm/example")])
+        self.assertEqual(code, 0)
+        args = calls["args"]
+        self.assertIn("vnc", args)
+        self.assertIn(True, args)
 
 
 class HelperListTests(unittest.TestCase):

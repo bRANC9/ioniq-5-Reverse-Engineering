@@ -23,7 +23,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import gen5w_decrypt as gd  # noqa: E402
+import gen5w_decrypt as gd
 
 
 class EncryptError(Exception):

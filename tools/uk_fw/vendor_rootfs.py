@@ -220,7 +220,7 @@ if [ -n "$NPID" ]; then
     # A connected Wayland client's fd shows socket:[N], never a path, so the socket
     # table cannot attribute a client to the compositor. Count the raw sockets and
     # read the compositor's own debug log instead; only that log can say who asked.
-    echo APPNAVI_SOCKET_FDS=$($BB ls -l /proc/$NPID/fd 2>/dev/null | $BB grep -c 'socket:\[')
+    echo APPNAVI_SOCKET_FDS=$($BB ls -l /proc/$NPID/fd 2>/dev/null | $BB grep -c 'socket:\\[')
     echo APPNAVI_SWRAST_MAPS=$($BB grep -cE 'swrast_dri|libLLVM' /proc/$NPID/maps 2>/dev/null)
     echo APPNAVI_GL_LIBS=$($BB grep -oE 'lib(EGL|GLESv2|wayland-egl|i965_dri)|swrast_dri|libLLVM[^ ]*' /proc/$NPID/maps 2>/dev/null | $BB sort -u | $BB tr '\n' ' ')
 fi
@@ -266,9 +266,9 @@ echo OBSERVER_LATE_STDERR=$($BB grep -c 'navi-bg:' /tmp/chain/launcher.log 2>/de
 # The compositor's own protocol log is the only place that shows which client asked
 # for a surface, so it is the measurement the navigation status rests on.
 echo WESTON_CREATE_SURFACE=$($BB grep -c 'create_surface' /tmp/chain/weston.log 2>/dev/null)
-echo WESTON_COMMITS=$($BB grep -c 'wl_surface@[0-9]*\.commit' /tmp/chain/weston.log 2>/dev/null)
+echo WESTON_COMMITS=$($BB grep -c 'wl_surface@[0-9]*\\.commit' /tmp/chain/weston.log 2>/dev/null)
 echo WESTON_REGISTRIES=$($BB grep -c 'get_registry' /tmp/chain/weston.log 2>/dev/null)
-echo WESTON_SURFACE_TAIL=$($BB grep -E 'create_surface|wl_surface@[0-9]+\.(attach|commit)' /tmp/chain/weston.log 2>/dev/null | $BB tail -n 6 | $BB tr '\n' '|')
+echo WESTON_SURFACE_TAIL=$($BB grep -E 'create_surface|wl_surface@[0-9]+\\.(attach|commit)' /tmp/chain/weston.log 2>/dev/null | $BB tail -n 6 | $BB tr '\n' '|')
 echo OBSERVER_LATE_FILE=$($BB grep -c 'navi-bg:' /tmp/navi-bg.log 2>/dev/null)
 $BB grep 'navi-bg:' /tmp/navi-bg.log 2>/dev/null | $BB tail -n 30
 # AppNavi itself needs its EGL stack, which the recovered root does not carry, so
@@ -345,7 +345,7 @@ def build_helpers(destination: Path, source: Path) -> dict[str, object]:
             "binaries": list(HELPER_BINARIES)}
 
 
-def assemble(tree_root: Path, new_gui: Path, navi: Path, helpers: Path,
+def assemble(tree_root: Path, new_gui: Path, navi: Path, helpers: Path | None,
              tree: Path) -> dict[str, object]:
     """Build the guest root: vendor root plus the two app trees and our helpers."""
     for name, path in (("root", tree_root), ("new_gui", new_gui), ("navi", navi)):
@@ -362,12 +362,13 @@ def assemble(tree_root: Path, new_gui: Path, navi: Path, helpers: Path,
     binary.mkdir(parents=True, exist_ok=True)
     toolchain = None
     wanted = HELPER_BINARIES
-    if all((helpers / name).is_file() for name in wanted):
+    prebuilt = helpers is not None and all((helpers / name).is_file() for name in wanted)
+    if prebuilt:
         toolchain = {"toolchain": "prebuilt", "source": str(helpers)}
     else:
         toolchain = build_helpers(binary, HELPERS)
     for name in wanted:
-        if not (binary / name).is_file():
+        if prebuilt and not (binary / name).is_file():
             shutil.copyfile(helpers / name, binary / name)
         (binary / name).chmod(0o755)
     (tree / "opt/vm/vendor-chain.sh").write_text(CHAIN, encoding="utf-8")
@@ -397,7 +398,7 @@ def build_image(tree: Path, image: Path, size_mib: int) -> list[str]:
 
 
 def prepare(container: Path, tree_root: Path, new_gui: Path, navi: Path,
-            helpers: Path, workspace: Path, image_mib: int) -> Path:
+            helpers: Path | None, workspace: Path, image_mib: int) -> Path:
     workspace = vm_boot.project_output(workspace)
     if workspace.exists():
         raise VendorError(f"workspace already exists, choose another path: {workspace}")
@@ -485,11 +486,11 @@ def refresh(workspace: Path, tree: Path | None = None) -> dict[str, object]:
         for entry in entries:
             target = "/" + str(entry.relative_to(tree))
             relative_target = str(entry.relative_to(source_root))
-            if entry.is_symlink():
-                # debugfs does not reliably create symlinks, and the guest only needs
-                # the SONAME file to exist, so the link is materialised as a copy.
-                entry = entry.resolve()
-            if entry.is_dir():
+            # debugfs does not reliably create symlinks, and the guest only needs the
+            # SONAME file to exist, so a link is materialised as a copy of its target
+            # while the written name stays the link's own path.
+            source_path = entry.resolve() if entry.is_symlink() else entry
+            if source_path.is_dir():
                 created = subprocess.run(
                     [debugfs, "-w", "-R", f'mkdir "{target}"', str(image)],
                     capture_output=True, text=True, check=False)
@@ -502,7 +503,7 @@ def refresh(workspace: Path, tree: Path | None = None) -> dict[str, object]:
             subprocess.run([debugfs, "-w", "-R", f'rm "{target}"', str(image)],
                            capture_output=True, check=False)
             written = subprocess.run(
-                [debugfs, "-w", "-R", f'write "{entry}" "{target}"', str(image)],
+                [debugfs, "-w", "-R", f'write "{source_path}" "{target}"', str(image)],
                 capture_output=True, text=True, check=False)
             stat = subprocess.run([debugfs, "-R", f'stat "{target}"', str(image)],
                                   capture_output=True, text=True, check=False)
@@ -511,7 +512,7 @@ def refresh(workspace: Path, tree: Path | None = None) -> dict[str, object]:
                     f"debugfs could not write {relative_target}: "
                     f"{(written.stdout + stat.stdout + written.stderr + stat.stderr)[-300:]}")
             inode = re.search(r"Inode:\s*(\d+)", stat.stdout)
-            mode = "0100755" if os.access(entry, os.X_OK) else "0100644"
+            mode = "0100755" if os.access(source_path, os.X_OK) else "0100644"
             if inode:
                 subprocess.run([debugfs, "-w", "-R", f"sif <{inode[1]}> mode {mode}",
                                 str(image)], capture_output=True, check=False)
@@ -571,22 +572,26 @@ def main(argv=None) -> int:
     boot.add_argument("--cmd", default="/opt/vm/vendor-chain.sh")
     boot.add_argument("--timeout", type=float, default=180)
     boot.add_argument("--memory-mib", type=int, default=1536)
+    boot.add_argument("--display", choices=vm_boot.DISPLAY_CHOICES, default="none",
+                      help="none, a window (gtk/sdl/cocoa), or vnc on 127.0.0.1:0")
+    boot.add_argument("--interactive", action="store_true",
+                      help="forward your terminal into the guest shell")
     boot.add_argument("--software-gl", action="store_true",
                       help="experimental: bind the llvmpipe stack over the vendor EGL entry points")
     args = parser.parse_args(argv)
     try:
         if args.action == "prepare":
             print(prepare(args.container, args.root, args.new_gui, args.navi,
-                          args.helpers or Path("/nonexistent"), args.workspace,
-                          args.image_mib))
+                          args.helpers, args.workspace, args.image_mib))
             return 0
         if args.action == "refresh":
             print(json.dumps(refresh(args.workspace, args.tree)))
             return 0
         set_software_gl(args.workspace, getattr(args, "software_gl", False))
         return vm_boot.run(args.workspace, True, args.cmd, args.timeout,
-                           False, "none", False, vm_boot.VM_CPU_CHOICES[0],
-                           False, args.memory_mib)
+                           getattr(args, "interactive", False),
+                           getattr(args, "display", "none"), False,
+                           vm_boot.VM_CPU_CHOICES[0], False, args.memory_mib)
     except (OSError, ValueError, subprocess.SubprocessError, VendorError) as exc:
         print(f"vendor_rootfs: {exc}", file=sys.stderr)
         return 2

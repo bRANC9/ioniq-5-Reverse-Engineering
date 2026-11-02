@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import functools
 import json
 import os
 from pathlib import Path
@@ -232,34 +233,37 @@ def worker(tree: Path, state_path: Path, out_root: Path, timeout: int,
             # truncations, and neither may be recorded as a finished binary.
             record["timed_out"] = returncode in (-1, 3)
 
-            def record_outcome(current: dict) -> None:
-                """Write back under the state lock, on the freshest snapshot.
-
-                The worker can hold a job for hours, so the state it read at the top of
-                the loop is stale by now; saving that snapshot would erase every record a
-                sibling worker committed in the meantime.
-                """
-                current.setdefault("done", {})
-                current.setdefault("failed", {})
-                # A timeout leaves partial output behind; that is not a finished binary.
-                if artifacts and not record["timed_out"]:
-                    # The artifacts are the deliverable: a binary that produced them is
-                    # done even when the headless launcher exits non-zero for its own
-                    # reasons. One binary lives in exactly one set.
-                    current["done"][target["path"]] = record
-                    current["failed"].pop(target["path"], None)
-                    processed.append(record)
-                else:
-                    if artifacts:
-                        record["partial_artifacts"] = artifacts
-                    record["log_tail"] = output[-500:]
-                    current["failed"][target["path"]] = record
-                    current["done"].pop(target["path"], None)
-
-            update_state(state_path, record_outcome)
+            # functools.partial binds the values now; a plain closure over loop variables
+            # would be the B023 bug and could record the wrong binary.
+            update_state(state_path, functools.partial(
+                apply_outcome, path=target["path"], record=record,
+                artifacts=artifacts, output=output))
         finally:
             release(state_path, target["path"])
     return {"processed": processed}
+
+
+def apply_outcome(state: dict, *, path: str, record: dict, artifacts: int,
+                 output: str) -> None:
+    """Record one job's outcome on the freshest state snapshot.
+
+    The worker can hold a job for hours, so the state it read at the top of the loop is
+    stale; this runs under the state lock, on a fresh read.
+    """
+    state.setdefault("done", {})
+    state.setdefault("failed", {})
+    # A timeout leaves partial output behind; that is not a finished binary.
+    if artifacts and not record.get("timed_out"):
+        # The artifacts are the deliverable: a binary that produced them is done even
+        # when the headless launcher exits non-zero for its own reasons.
+        state["done"][path] = record
+        state["failed"].pop(path, None)
+    else:
+        if artifacts:
+            record["partial_artifacts"] = artifacts
+        record["log_tail"] = output[-500:]
+        state["failed"][path] = record
+        state["done"].pop(path, None)
 
 
 def count_queue(state: dict) -> dict:
