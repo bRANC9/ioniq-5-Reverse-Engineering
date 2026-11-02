@@ -163,6 +163,18 @@ class ProtocolTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_vnc_display_keeps_the_guest_headless_on_loopback(self):
+        command = VM.qemu_command(Path("/w"), "qemu-system-x86_64", False,
+                                  display="vnc")
+        joined = " ".join(command)
+        self.assertIn("-vnc 127.0.0.1:0", joined)
+        self.assertIn("-display none", joined)
+        self.assertNotIn("-nic user", joined)
+
+    def test_unsupported_display_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "display"):
+            VM.qemu_command(Path("/w"), "qemu-system-x86_64", False, display="spice")
+
     def test_no_initramfs_network_or_writable_base_image(self):
         cmd = VM.qemu_command(VM.PROJECT / "work/vm/example", "qemu", False)
         self.assertNotIn("-initrd", cmd)

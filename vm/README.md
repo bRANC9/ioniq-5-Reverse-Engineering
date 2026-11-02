@@ -62,6 +62,31 @@ skips when QEMU or the workspace is absent. `vm_boot.py` resolves QEMU from
 `IONIQ_VM_QEMU`, then `work/tools/qemu/bin/qemu-system-x86_64`, then `PATH`, so
 the locally unpacked binary needs no `PATH` edit.
 
+## Manual inspection
+
+Two ways to look at a run yourself, both offline and snapshot-only.
+
+**Interactively at the serial shell** — the harness forwards your terminal into the guest:
+
+```sh
+# kernel shell
+python3 tools/uk_fw/vm_boot.py run --workspace work/vm/bootable-eu260128 \
+    --sdhci-compat --interactive --timeout 0
+
+# recovered vendor userspace, with the launcher chain running
+python3 tools/uk_fw/vm_boot.py run --workspace work/vm/vendor-userspace-260128 \
+    --sdhci-compat --interactive --timeout 0
+```
+
+Inside the vendor guest the chain script and its artifacts are on disk, so you can poke at
+a live system: `/opt/vm/vendor-chain.sh` re-runs the stages, `/tmp/chain/` holds the
+launcher, weston and client logs, `dbus-send` talks to the manager, and
+`weston-screenshooter` (run from `/tmp`) captures the real compositor.
+
+**With a display** — `--display vnc` serves the guest framebuffer on
+`127.0.0.1:0` (connect any VNC client); `--display gtk` or `sdl` opens a local window
+when the host has one. The guest itself stays headless and network-free either way.
+
 ## Recovered vendor userspace
 
 The kernel shell above contains no vendor code. The recovered root is booted from a

@@ -3,6 +3,18 @@
 All entries describe the IONIQ 5 research programme. The root `CHANGELOG.md`
 belongs to the parallel Kona programme and is not modified by IONIQ work.
 
+## 0.95.0 - manual inspection of a live guest
+
+- `vm_boot.py` accepts `--display vnc` (guest framebuffer on `127.0.0.1:0`, headless and
+  network-free) and `gtk`/`sdl` windows beside the existing headless modes; the CLI
+  advertises the real choice list and refuses anything else.
+- Documented the two manual routes in `vm/README.md`: an interactive serial shell
+  (`--interactive --timeout 0`) into either workspace, and a display-backed run. Inside
+  the vendor guest `/opt/vm/vendor-chain.sh`, `/tmp/chain/`, `dbus-send` and
+  `weston-screenshooter` are all available on a live system.
+- Tests: the VNC command keeps `-display none` plus loopback-only `-vnc` and adds no NIC,
+  and an unknown backend is refused.
+
 ## 0.94.0 - whole-tree decompile queue for the vendor application layer
 
 - Added `tools/uk_fw/decompile_all.py`: it inventories every ELF in `app/` and `navi/`

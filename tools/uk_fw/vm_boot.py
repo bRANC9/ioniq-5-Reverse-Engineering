@@ -39,6 +39,8 @@ EXT4_FEATURES = ("none,has_journal,ext_attr,resize_inode,dir_index,filetype,exte
                  "flex_bg,sparse_super,large_file,huge_file,dir_nlink,extra_isize")
 ARTIFACTS = ("bzImage", "rootfs.img", "manifest.bin", "seed_dev.bin", "seed_user.bin")
 QEMU_ENV = "IONIQ_VM_QEMU"
+# Display backends for manual inspection: a window, or a VNC server on loopback.
+DISPLAY_CHOICES = ("none", "cocoa", "gtk", "sdl", "vnc")
 LOCAL_QEMU = PROJECT / "work/tools/qemu/bin/qemu-system-x86_64"
 DEFAULT_COMMAND = ("/bin/busybox uname -r; /bin/busybox id; "
                    "/bin/busybox cat /proc/partitions; "
@@ -322,8 +324,8 @@ def qemu_command(workspace: Path, qemu: str, compat: bool,
                  cpu: str = VM_CPU_CHOICES[0],
                  micom_serial: bool = False,
                  memory_mib: int = 1024) -> list[str]:
-    if display not in ("none", "cocoa"):
-        raise ValueError("supported display backends: none, cocoa")
+    if display not in DISPLAY_CHOICES:
+        raise ValueError("supported display backends: " + ", ".join(DISPLAY_CHOICES))
     if cpu not in VM_CPU_CHOICES:
         raise ValueError("unsupported VM CPU feature profile")
     if memory_mib < 256 or memory_mib > 8192:
@@ -341,7 +343,12 @@ def qemu_command(workspace: Path, qemu: str, compat: bool,
                 "root=/dev/mmcblk0 rootwait rootdelay=2 rootfstype=ext4 rw init=/init "
                 "console=ttyS0,115200 panic=-1 loglevel=7 "
                 "ABL.oemkm=40@20000000 ABL.seed=21000000,21000040",
-                "-display", display, "-serial", "stdio", "-monitor", "none", "-no-reboot"]
+                "-serial", "stdio", "-monitor", "none", "-no-reboot"]
+    if display == "vnc":
+        # Headless-friendly manual inspection: point a VNC client at 127.0.0.1:0.
+        command += ["-display", "none", "-vnc", "127.0.0.1:0"]
+    else:
+        command += ["-display", display]
     if micom_serial:
         # Provide the recovered micom manager's /dev/ttyS1 hardware boundary.
         # The backend is a project-local Unix socket captured by run(); no NIC.
@@ -529,7 +536,8 @@ def main(argv=None) -> int:
     boot.add_argument("--cmd", default=DEFAULT_COMMAND)
     boot.add_argument("--timeout", type=float, default=60)
     boot.add_argument("--interactive", action="store_true", help="forward terminal input; Ctrl-C stops QEMU")
-    boot.add_argument("--display", choices=("none", "cocoa"), default="none")
+    boot.add_argument("--display", choices=DISPLAY_CHOICES, default="none",
+                        help="none, a window (gtk/sdl/cocoa), or vnc on 127.0.0.1:0 for manual inspection")
     boot.add_argument("--graphics-smoke", action="store_true", help="verify diagnostic pixels and QEMU keyboard input")
     boot.add_argument("--cpu", choices=VM_CPU_CHOICES, default=VM_CPU_CHOICES[0],
                       help="bounded QEMU CPU profile; -avx2 is a glibc/TCG control")
