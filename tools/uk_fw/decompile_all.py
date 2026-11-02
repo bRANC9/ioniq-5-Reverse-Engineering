@@ -206,6 +206,10 @@ def worker(tree: Path, state_path: Path, out_root: Path, timeout: int,
                                       / Path(target["path"]).name),
                        "--out", str(out), "--limit", "0",
                        "--analysis-timeout", "1800", "--function-timeout", "60",
+                       # The inner launcher deadline has to fire before ours, so a
+                       # truncation is reported (exit 3) instead of being killed here
+                       # with no record of why.
+                       "--timeout", str(max(60, timeout - 120)),
                        "--discard"]
             started = time.time()
             try:
@@ -224,7 +228,9 @@ def worker(tree: Path, state_path: Path, out_root: Path, timeout: int,
             artifacts = (len(list(out.glob("*.c"))) + len(list(out.glob("*.asm")))
                          if out.is_dir() else 0)
             record["artifacts"] = artifacts
-            record["timed_out"] = returncode == -1
+            # -1: our own kill; 3: the wrapper reported its launcher deadline. Both are
+            # truncations, and neither may be recorded as a finished binary.
+            record["timed_out"] = returncode in (-1, 3)
 
             def record_outcome(current: dict) -> None:
                 """Write back under the state lock, on the freshest snapshot.
@@ -274,25 +280,35 @@ def count_queue(state: dict) -> dict:
 def repair_state(state_path: Path, out_root: Path) -> int:
     """Resolve entries that sit in both `done` and `failed`.
 
-    The artifact on disk decides: a directory with C or listing output means the binary
-    decompiled, so the failure record is dropped (and the other way round).
+    The artifact on disk decides — with one exception: a record that carries
+    `timed_out` or `partial_artifacts` is a truncated run, and truncated output must
+    never be promoted to done just because files exist.
     """
+    def truncated(record: dict) -> bool:
+        return bool(record.get("timed_out") or record.get("partial_artifacts"))
+
     state = load_state(state_path)
     overlap = set(state["done"]) & set(state["failed"])
     fixed = 0
-    # A failure record whose binary already has artifacts on disk is stale: the run that
-    # recorded it predates the artifact-based success rule.
     for relative in list(state["failed"]):
+        record = state["failed"][relative]
+        if truncated(record):
+            continue
         out = out_root / Path(relative).name
         if out.is_dir() and (any(out.glob("*.c")) or any(out.glob("*.asm"))):
-            record = state["failed"].pop(relative)
+            state["failed"].pop(relative)
             record.setdefault("note", "repaired: artifacts on disk")
             state["done"][relative] = record
             fixed += 1
     for relative in overlap:
+        failed_record = state["failed"].get(relative, {})
+        if truncated(failed_record) or truncated(state["done"].get(relative, {})):
+            # Keep the failure side: the run did not finish, whatever is on disk.
+            state["done"].pop(relative, None)
+            fixed += 1
+            continue
         out = out_root / Path(relative).name
-        has_artifacts = out.is_dir() and any(
-            out.glob("*.c")) or out.is_dir() and any(out.glob("*.asm"))
+        has_artifacts = out.is_dir() and (any(out.glob("*.c")) or any(out.glob("*.asm")))
         if has_artifacts:
             state["failed"].pop(relative, None)
             state["done"][relative].setdefault("note", "repaired: artifacts on disk")
@@ -317,6 +333,8 @@ def main(argv=None) -> int:
                         help="i/n: process only every n-th pending binary")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the queue and exit")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="requeue recorded failures for one more attempt")
     args = parser.parse_args(argv)
 
     state_path = args.state.resolve()
@@ -326,6 +344,11 @@ def main(argv=None) -> int:
     if "queue" not in state:
         state["queue"] = elf_files(args.tree, tuple(args.roots))
         save_state(state_path, state)
+    if args.retry_failed:
+        def requeue(current: dict) -> None:
+            for relative in list(current.get("failed", {})):
+                current["failed"].pop(relative)
+        update_state(state_path, requeue)
     repaired = repair_state(state_path, args.out.resolve())
     if repaired:
         print(json.dumps({"repaired_overlap": repaired}))

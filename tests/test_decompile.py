@@ -213,6 +213,45 @@ class InventoryQueueTests(unittest.TestCase):
             self.assertTrue(saved["failed"]["app/bin/Slow"]["timed_out"])
             self.assertEqual(saved["failed"]["app/bin/Slow"]["partial_artifacts"], 1)
 
+    def test_repair_does_not_promote_a_truncated_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "out"
+            (out / "Slow").mkdir(parents=True)
+            (out / "Slow" / "partial.c").write_text("/* partial */\n")
+            state_path = root / "state.json"
+            self.module.save_state(state_path, {
+                "schema": 1, "queue": [{"path": "app/bin/Slow", "size": 1}],
+                "done": {},
+                "failed": {"app/bin/Slow": {"timed_out": True, "partial_artifacts": 1}},
+                "claimed": {}})
+            self.module.repair_state(state_path, out)
+            repaired = self.module.load_state(state_path)
+            self.assertIn("app/bin/Slow", repaired["failed"])
+            self.assertNotIn("app/bin/Slow", repaired["done"])
+            counts = self.module.count_queue(repaired)
+            self.assertEqual((counts["done"], counts["failed"]), (0, 1))
+
+    def test_wrapper_timeout_exit_is_recorded_as_truncated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "tree"
+            (tree / "app/bin").mkdir(parents=True)
+            (tree / "app/bin/Slow").write_bytes(b"\x7fELF" + bytes(60))
+            state_path = root / "state.json"
+            out = root / "out"
+            (out / "Slow").mkdir(parents=True)
+            (out / "Slow" / "partial.c").write_text("/* partial */\n")
+            self.module.save_state(state_path, {
+                "schema": 1, "queue": [{"path": "app/bin/Slow", "size": 64}],
+                "done": {}, "failed": {}, "claimed": {}})
+            with mock.patch.object(self.module.subprocess, "run",
+                                   return_value=mock.Mock(returncode=3, stdout="", stderr="")):
+                self.module.worker(tree, state_path, out, 60, (0, 1))
+            saved = self.module.load_state(state_path)
+            self.assertIn("app/bin/Slow", saved["failed"])
+            self.assertTrue(saved["failed"]["app/bin/Slow"]["timed_out"])
+
     def test_a_sibling_record_survives_a_slow_job(self):
         """The worker must write back onto the freshest state, not its stale snapshot."""
         with tempfile.TemporaryDirectory() as directory:

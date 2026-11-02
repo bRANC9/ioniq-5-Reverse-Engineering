@@ -125,9 +125,20 @@ def decompile(binary: Path, select: str, out: Path, ghidra: Path,
             command += ["-max-cpu", str(max_cpu)]
         if discard:
             command += ["-deleteProject"]
-    finished = subprocess.run(command, cwd=PROJECT, env=env, capture_output=True,
-                              text=True, timeout=timeout, check=False)
-    log = (finished.stdout or "") + (finished.stderr or "")
+    timed_out = False
+    try:
+        finished = subprocess.run(command, cwd=PROJECT, env=env, capture_output=True,
+                                  text=True, timeout=timeout, check=False)
+        returncode = finished.returncode
+        log = (finished.stdout or "") + (finished.stderr or "")
+    except subprocess.TimeoutExpired as expired:
+        # A killed headless run leaves a half-imported project and partial output; the
+        # caller has to be able to tell that apart from a finished one.
+        timed_out = True
+        returncode = -1
+        log = f"headless run exceeded {timeout}s\n" + (
+            (expired.stdout or b"").decode("utf-8", "replace")[-2000:]
+            if isinstance(expired.stdout, bytes) else (expired.stdout or "")[-2000:])
     (out / "ghidra.log").write_text(log, encoding="utf-8")
     produced = sorted(out.glob("*.c"))
     produced_total = len(produced)
@@ -156,7 +167,8 @@ def decompile(binary: Path, select: str, out: Path, ghidra: Path,
         "failure_rows": failure_rows,
         "log_path": str(out / "ghidra.log"),
         "files": sample,
-        "returncode": finished.returncode,
+        "returncode": returncode,
+        "timed_out": timed_out,
         "log_tail": log.strip().splitlines()[-6:],
     }
 
@@ -195,6 +207,9 @@ def main(argv=None) -> int:
         print(f"decompile: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2))
+    if report.get("timed_out"):
+        # Distinct code: the caller must not read a truncated run as a finished one.
+        return 3
     if report["returncode"] != 0:
         return 1
     if report["failed"] and not report["decompiled"] and not report["skipped"]:
